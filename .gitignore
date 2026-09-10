@@ -1,0 +1,8 @@
+# Generated IMERG data files are stored on Google Drive, not in Git.
+IMERG/*.nc
+IMERG/*.nc4
+IMERG/*.hdf5
+IMERG/*.HDF5
+IMERG/data/
+IMERG/figures/
+IMERG/figures_eda/
