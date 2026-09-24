@@ -7,3 +7,7 @@ IMERG/data/
 IMERG/figures/
 IMERG/figures_eda/
 Himawari/data/himawari
+
+# Keep metadata and small prepared support files, but exclude generated datasets.
+IMERG/data/prepared/*_raw.nc
+IMERG/data/prepared/*_normalized.nc

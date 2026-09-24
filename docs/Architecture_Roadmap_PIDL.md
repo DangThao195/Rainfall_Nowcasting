@@ -30,6 +30,16 @@ timeline
 * **Đầu ra dự báo (Target)**: $R_{t+1:t+4} \in \mathbb{R}^{B \times 4 \times 165 \times 80 \times 1}$ (4 frame tương lai 30 phút = 2 giờ tới).
 * **Đơn vị dữ liệu**: $\text{mm/30 min}$ (đã biến đổi log: $y = \log(1 + x)$).
 
+#### 2.1.1 Bản Chất Feature & Cấu Trúc 1 Dòng Dữ Liệu
+* **Feature duy nhất**: `rainfall` ($\text{mm/30 min}$) — Cường độ mưa tích lũy trong 30 phút tại từng điểm lưới.
+* **Định dạng NetCDF 3D**: $(\text{time}: 35089, \text{lat}: 165, \text{lon}: 80)$.
+* **Cấu trúc 1 Dòng (Pixel-level Record)**: `[time, lat, lon, rainfall]`
+  * Mỗi mốc `time` chứa ma trận $165 \times 80 = 13,200$ pixels.
+  * Toàn bộ bộ dữ liệu tương đương $35,089 \times 13,200 = \mathbf{463,174,800}$ bản ghi.
+* **Cấu trúc 1 Sample Train (Mô hình Deep Learning)**:
+  * **Input Tensor $\mathbf{X}$**: Chuỗi 6 ma trận $165 \times 80$ quá khứ $\implies (6, 165, 80, 1)$.
+  * **Target Tensor $\mathbf{Y}$**: Chuỗi 4 ma trận $165 \times 80$ tương lai $\implies (4, 165, 80, 1)$.
+
 ---
 
 ### 2.2 Sơ đồ Kiến trúc Trực quan Giai đoạn 1
