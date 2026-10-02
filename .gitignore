@@ -7,3 +7,11 @@ IMERG/data/
 IMERG/figures/
 IMERG/figures_eda/
 Himawari/data/himawari
+IMERG_data/
+
+# Python caches
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
