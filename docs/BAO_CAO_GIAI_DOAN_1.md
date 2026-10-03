@@ -8,6 +8,8 @@ Bài toán hiện tại sử dụng **6 ảnh mưa liên tiếp trong 3 giờ g�
 
 Kết quả trên tập test cho thấy ConvLSTM đạt MAE `0,170 mm/30 phút` và RMSE `0,598 mm/30 phút`, giảm lần lượt khoảng `22,1%` và `22,2%` so với persistence baseline. Mô hình dự báo khá tốt mưa nhẹ và mưa vừa trong khoảng 30–120 phút, nhưng vẫn còn hạn chế đối với mưa lớn và dự báo cuốn chiếu dài hạn.
 
+Bên cạnh IMERG, đề tài đã khảo sát và xây dựng pipeline ban đầu cho hai nguồn dữ liệu bổ sung là **Himawari-9** và **ERA5**. Himawari cung cấp thông tin mây qua các băng hồng ngoại/hơi nước; ERA5 cung cấp trường gió, nhiệt độ và áp suất. Hai nguồn này chưa được đưa vào checkpoint ConvLSTM hiện tại, nhưng là nền tảng cho mô hình đa nguồn và physics-informed ở giai đoạn tiếp theo.
+
 ---
 
 ## 1. Tìm và thu thập dữ liệu
@@ -54,6 +56,65 @@ Pipeline tải dữ liệu có các cơ chế:
 | Dữ liệu sau khi nối | 01/01/2023 – 30/09/2025 | 48.192 | Đã loại frame trùng tại ranh giới hai file |
 
 Pipeline không tự gán lượng mưa bằng 0 cho khoảng thời gian chưa tải, vì giá trị 0 mang ý nghĩa “không mưa”, khác hoàn toàn với “không có dữ liệu”.
+
+### 1.4. Hai nguồn dữ liệu bổ sung đã chuẩn bị
+
+Ba nguồn dữ liệu trong repo có vai trò khác nhau và đang ở các mức hoàn thiện khác nhau:
+
+| Nguồn | Vai trò dự kiến | Công việc đã hoàn thành | Trạng thái đối với model hiện tại |
+|---|---|---|---|
+| IMERG | Biến mưa đầu vào và ground truth | Tải, crop, EDA, split, chuẩn hóa, tạo window | **Đã dùng để train và test** |
+| Himawari-9 AHI | Quan sát mây, hơi nước và nhiệt độ đỉnh mây | Khảo sát nguồn, tải HSD, giải mã B13, kiểm tra nhiều băng, tạo chuỗi quick-look | **Chưa dùng để train** |
+| ERA5 | Bối cảnh động lực học: gió, nhiệt độ, áp suất và mưa | Tải 2023–2025, EDA đa biến, chuẩn hóa, tạo tensor và DataLoader | **Chưa ghép với model IMERG hiện tại** |
+
+#### 1.4.1. Himawari-9
+
+Himawari-9 mang cảm biến **Advanced Himawari Imager (AHI)** gồm 16 băng phổ và có ảnh Full Disk mỗi 10 phút. Đề tài đã khảo sát nguồn NOAA Open Data trên AWS, cấu trúc file HSD và phương án lấy mẫu xuống 30 phút để đồng bộ với IMERG.
+
+Các công việc đã thực hiện trong thư mục [`Himawari/`](../Himawari/) gồm:
+
+1. Xác định nguồn `noaa-himawari9` và cấu trúc prefix Full Disk.
+2. Xác định ba segment `S03`, `S04`, `S05` bao phủ bounding box Việt Nam.
+3. Tải thử sáu băng `B08`, `B09`, `B10`, `B13`, `B14`, `B15` tại một observation slot, tổng cộng 18 file.
+4. Đọc HSD bằng Satpy và hiệu chỉnh B13 thành brightness temperature theo Kelvin.
+5. Tải chuỗi B13 theo các mốc 30 phút và xác nhận 48 timestamp hoàn chỉnh trong một ngày.
+6. Xây dựng notebook tải một tháng, crop Việt Nam và lưu NetCDF nén.
+7. Trực quan hóa chuỗi B13 để quan sát sự hình thành, phát triển và di chuyển của mây.
+
+![Chuỗi ảnh Himawari-9 B13 trong một ngày](../Himawari/data/himawari/b13_timeline.png)
+
+**Hình 1.** Chuỗi 48 thời điểm B13 cách nhau 30 phút. B13 ở bước sóng khoảng `10,4 µm` biểu diễn nhiệt độ sáng đỉnh mây; vùng có nhiệt độ thấp thường liên quan đến đỉnh mây cao và đối lưu phát triển.
+
+Himawari không đo trực tiếp lượng mưa tại mặt đất. Vì vậy, các băng AHI được xem là predictor hỗ trợ, trong khi IMERG tiếp tục đóng vai trò nhãn lượng mưa. Dữ liệu mẫu Himawari hiện có thuộc năm 2026, chưa trùng thời gian với bộ IMERG 2023–09/2025; muốn huấn luyện đa nguồn cần backfill kho lưu trữ Himawari cho đúng giai đoạn IMERG.
+
+#### 1.4.2. ERA5
+
+ERA5 là dữ liệu tái phân tích khí quyển, cung cấp các biến động lực và nhiệt động mà ảnh mưa đơn biến không thể hiện trực tiếp. Pipeline trong thư mục [`ERA5/`](../ERA5/) đã xử lý dữ liệu từ đầu năm 2023 đến hết năm 2025.
+
+| Thuộc tính | Giá trị |
+|---|---|
+| Khoảng thời gian | 01/01/2023 – 31/12/2025 |
+| Tần suất | 1 giờ/frame |
+| Số frame | 26.304 |
+| Lưới | `81 × 81` |
+| Phạm vi | `100–120°E`, `5–25°N` |
+| Độ phân giải | `0,25° × 0,25°` |
+| Kênh chính đã chuẩn bị | `tp`, `t2m`, `msl`, `u10`, `v10` |
+| Biến dẫn xuất trong EDA | Nhiệt độ °C, tốc độ gió và hướng gió |
+
+Các công việc đã hoàn thành:
+
+1. Xây dựng notebook tải dữ liệu ERA5 bằng CDS/Modal.
+2. Hợp nhất dữ liệu tích lũy và dữ liệu tức thời.
+3. Kiểm tra chất lượng, thống kê và EDA đa biến.
+4. Phân tích mối quan hệ giữa trường gió và vùng mưa bằng streamline.
+5. Phân tích mất cân bằng mưa, mùa, chu kỳ ngày–đêm và sự kiện cực đoan.
+6. Chia dữ liệu theo thời gian thành 13.128 frame train, 4.416 frame validation và 8.760 frame test.
+7. Tính tham số chuẩn hóa chỉ trên tập train.
+8. Tạo tensor năm kênh kích thước `(26.304, 5, 81, 81)` và lưu theo cơ chế memory-efficient.
+9. Xây dựng `ERA5NowcastDataset` với 6 frame đầu vào và 6 frame đầu ra.
+
+Kết quả thử DataLoader cho thấy input có shape `(B, 6, 5, 81, 81)` và target mưa có shape `(B, 6, 1, 81, 81)`. Dữ liệu ERA5 đã sẵn sàng ở mức pipeline riêng, nhưng chưa được regrid từ lưới `0,25°` sang lưới IMERG `0,1°`, chưa đổi từ bước thời gian 1 giờ sang 30 phút và chưa được ghép vào model ConvLSTM đang báo cáo.
 
 ---
 
@@ -301,6 +362,24 @@ $$
 
 Đây là baseline quan trọng cho nowcasting vì các vùng mưa thường có tính liên tục cao trong thời gian ngắn. Mô hình học máy chỉ thực sự có ý nghĩa khi cải thiện được kết quả so với phương pháp đơn giản này.
 
+### 3.7. Mức độ áp dụng công thức vật lý trong model hiện tại
+
+Mô hình ConvLSTM và checkpoint được báo cáo trong tài liệu này là **mô hình data-driven baseline**, chưa phải mô hình PINN/PIDL và chưa áp dụng trực tiếp các phương trình vật lý của paper ThoR.
+
+Các phương trình input gate, forget gate, output gate và cell state ở Mục 3.2 là cơ chế toán học của ConvLSTM, không phải phương trình vật lý khí quyển. Tương tự, Vietnam land mask và trọng số cho pixel mưa là kỹ thuật ưu tiên theo địa lý và xử lý mất cân bằng, không phải physics-informed loss.
+
+| Thành phần | ConvLSTM hiện tại | ThoR/PIDL theo hướng phát triển |
+|---|---|---|
+| Dữ liệu đầu vào | Một kênh mưa IMERG | Mưa cùng biểu diễn chuyển động và ràng buộc vật lý |
+| Trường vận tốc | Không có | Motion network dự báo $V=(u,v)$ |
+| Phương trình Advection–Diffusion | Không có | Đưa PDE residual vào loss |
+| Burgers' Equation | Không có | Cập nhật trường vận tốc tương lai |
+| TFC constrained expression | Không có | Ràng buộc điều kiện đầu/biên |
+| Loss | Weighted Huber | Data + velocity + physics + intensity + adversarial |
+| Dữ liệu bổ sung của đề tài | Chưa sử dụng | Có thể dùng Himawari và ERA5 để mở rộng paper |
+
+Việc giữ ConvLSTM làm baseline là cần thiết: sau khi thêm từng thành phần vật lý hoặc từng nguồn dữ liệu, có thể thực hiện ablation study để xác định chính xác cải thiện đến từ đâu.
+
 ---
 
 ## 4. Phương pháp huấn luyện
@@ -398,7 +477,7 @@ Sau 30 epoch, validation loss tốt nhất là `0,187581`, đạt tại epoch 30
 
 ![Đồ thị train và validation loss](../IMERG_data/outputs/convlstm/loss_curve.png)
 
-**Hình 1.** Weighted Huber loss trong 30 epoch. Train loss tăng dần ở giai đoạn sau chủ yếu vì teacher forcing được giảm từ `0,5` về `0`, khiến mô hình phải tự hồi quy nhiều hơn. Trong khi đó, validation loss được đo trong điều kiện tự hồi quy và vẫn có xu hướng giảm.
+**Hình 2.** Weighted Huber loss trong 30 epoch. Train loss tăng dần ở giai đoạn sau chủ yếu vì teacher forcing được giảm từ `0,5` về `0`, khiến mô hình phải tự hồi quy nhiều hơn. Trong khi đó, validation loss được đo trong điều kiện tự hồi quy và vẫn có xu hướng giảm.
 
 ### 5.2. Kết quả tổng hợp trên test
 
@@ -431,7 +510,7 @@ Sai số tăng và CSI giảm khi lead time dài hơn. Đây là đặc trưng t
 
 ![So sánh ground truth, ConvLSTM và sai số](../IMERG_data/outputs/convlstm/visualizations/test_window_4325.png)
 
-**Hình 2.** Ví dụ dự báo tại bốn lead time 30, 60, 90 và 120 phút. Cột trái là ground truth, cột giữa là dự báo ConvLSTM và cột phải là sai số `prediction - ground truth`.
+**Hình 3.** Ví dụ dự báo tại bốn lead time 30, 60, 90 và 120 phút. Cột trái là ground truth, cột giữa là dự báo ConvLSTM và cột phải là sai số `prediction - ground truth`.
 
 Ở ví dụ này, mô hình giữ được vị trí tổng quát và hình dạng chính của vùng mưa, đặc biệt tại mốc 30–60 phút. Khi thời gian dự báo tăng lên, bản đồ mưa dự báo trở nên mượt hơn, cực đại mưa giảm và sai số tăng dần.
 
@@ -441,7 +520,7 @@ Mô hình được train cho 4 frame, tức horizon 2 giờ. Repo có thêm th�
 
 ![So sánh tổng lượng mưa ngày quan sát và dự báo](../IMERG_data/outputs/convlstm/day_ahead_visualizations/2025-09-28_to_2025-09-29_accumulation.png)
 
-**Hình 3.** Tổng lượng mưa ngày 29/09/2025: ground truth, dự báo cuốn chiếu và sai số.
+**Hình 4.** Tổng lượng mưa ngày 29/09/2025: ground truth, dự báo cuốn chiếu và sai số.
 
 Trong thử nghiệm này:
 
@@ -466,8 +545,258 @@ Các kết quả đã hoàn thành trong giai đoạn 1 gồm:
 8. Hoàn thiện training loop, mixed precision, checkpoint và early stopping.
 9. Đánh giá ConvLSTM với persistence bằng MAE, RMSE, CSI và FSS.
 10. Xây dựng công cụ trực quan dự báo 2 giờ và khảo sát dự báo cuốn chiếu 24 giờ.
+11. Khảo sát Himawari-9, tải HSD nhiều băng và xây dựng chuỗi B13 30 phút.
+12. Tải, EDA và tiền xử lý ERA5 đa biến 2023–2025 thành tensor/DataLoader riêng.
 
 ConvLSTM đã vượt persistence baseline về sai số tổng thể và khả năng dự báo mưa nhẹ đến vừa. Hạn chế lớn nhất là dự báo mưa cực đoan, suy giảm cường độ theo lead time và tích lũy sai số khi dự báo dài. Đây là cơ sở để giai đoạn tiếp theo tập trung vào loss cho mưa lớn, mô hình đa nguồn dữ liệu và các ràng buộc động lực học vật lý.
+
+---
+
+## 6. Đối chiếu paper ThoR và hướng phát triển
+
+### 6.1. Paper được sử dụng làm định hướng
+
+Hướng phát triển physics-informed của đề tài dựa trên bài báo:
+
+> K. T. Gia, H. T. Van, A. P. Thanh và cộng sự, **“ThoR: A Motion-Dependent Physics-Informed Deep Learning Framework with Constraint-Centric Theory of Functional Connections for Rainfall Nowcasting”**, *Scientific Reports*, tập 15, bài 42075, 2025. DOI: [10.1038/s41598-025-26126-6](https://doi.org/10.1038/s41598-025-26126-6).
+
+ThoR giải quyết hai nhược điểm quan trọng của mô hình nowcasting thuần dữ liệu: dự báo bị làm mờ khi lead time tăng và kết quả có thể không phù hợp với chuyển động vật lý của hệ mưa. Kiến trúc của paper có hai nhánh chính:
+
+1. **Motion extraction network $M_\phi$:** học trường chuyển động $V=(u,v)$ từ chuỗi ảnh mưa.
+2. **Generator $G_\theta$:** sinh chuỗi mưa tương lai với điều kiện là lịch sử mưa và trường chuyển động.
+
+Paper gốc chỉ cần chuỗi bản đồ mưa làm input và tự học trường chuyển động. Trong đề tài này, ERA5 và Himawari được xem là phần mở rộng đa nguồn: ERA5 bổ sung bối cảnh động lực học quan sát được, còn Himawari bổ sung tín hiệu phát triển đối lưu trước khi mưa mặt đất xuất hiện rõ trên IMERG.
+
+### 6.2. Các thành phần vật lý có thể kế thừa
+
+#### a. Continuity và source/sink
+
+Chuyển động của trường mưa có thể mô tả gần đúng bằng:
+
+$$
+\frac{\partial R}{\partial t}+(V\cdot\nabla)R=s
+$$
+
+Trong đó $R$ là trường mưa, $V=(u,v)$ là trường chuyển động và $s$ là phần nguồn–hút biểu diễn sự hình thành hoặc tiêu tán mưa. Số hạng $s$ đặc biệt quan trọng với mưa đối lưu vì cường độ mưa không được bảo toàn tuyệt đối khi khối mưa di chuyển.
+
+#### b. Tiến hóa trường vận tốc bằng Burgers' Equation
+
+ThoR sử dụng phương trình Burgers hai chiều để cập nhật trường chuyển động:
+
+$$
+\frac{\partial V}{\partial t}=-(V\cdot\nabla)V+\mu\nabla^2V
+$$
+
+Với bước Euler tường minh:
+
+$$
+V_{t+\Delta t}=V_t+\Delta t\left[-(V_t\cdot\nabla)V_t+\mu\nabla^2V_t\right]
+$$
+
+Khác với ConvLSTM hiện tại chỉ hồi quy trên bản đồ mưa, cơ chế này duy trì và cập nhật một trạng thái chuyển động có ý nghĩa vật lý qua từng lead time.
+
+#### c. Advection–Diffusion physics loss
+
+Residual của phương trình bình lưu–khuếch tán:
+
+$$
+J_{physics}=\left\|
+\frac{R_t-R_{t-1}}{\Delta t}
++u_t\frac{\partial R_t}{\partial x}
++v_t\frac{\partial R_t}{\partial y}
+-\nu\left(
+\frac{\partial^2R_t}{\partial x^2}
++\frac{\partial^2R_t}{\partial y^2}
+\right)
+\right\|_2^2
+$$
+
+Các đạo hàm không gian có thể được xấp xỉ bằng finite difference hoặc convolution với kernel cố định. Physics loss giúp phạt những dự báo có chuyển động thiếu liên tục hoặc không phù hợp với trường vận tốc.
+
+Paper dùng trọng số thích nghi để giảm tác động của ràng buộc vật lý khi một chuỗi quan sát không phù hợp tốt với giả định advection–diffusion:
+
+$$
+\mathcal{L}_{physics}=\frac{1}{p}\frac{1}{n}\sum_{k=t}^{t+n}J_{physics}(R_k,V_k)
+$$
+
+#### d. Soft TFC và điều kiện đầu
+
+Theory of Functional Connections xây dựng một constrained expression:
+
+$$
+f_{CE}=A(R;\Theta)+\mathcal{P}_{null}[g(R)]
+$$
+
+Trong đó $A$ thỏa điều kiện đầu/biên và phần neural $g(R)$ chỉ học động lực còn thiếu. Một dạng đơn giản có thể khảo sát trong đề tài là:
+
+$$
+\hat{R}(t)=R_0+N(t)(1-e^{-t})
+$$
+
+Dạng này bảo đảm tại $t=0$, đầu ra nối liên tục với frame mưa cuối cùng $R_0$, hạn chế hiện tượng nhảy bước giữa quan sát và dự báo.
+
+#### e. Composite objective
+
+Loss của mô hình tương lai có thể kế thừa cấu trúc của ThoR:
+
+$$
+\mathcal{L}_{total}
+=\alpha\mathcal{L}_{velocity}
++\beta\mathcal{L}_{physics}
++\gamma\mathcal{L}_{data}
++\delta\mathcal{L}_{adv}
+$$
+
+Trong đó $\mathcal{L}_{data}$ có thể kết hợp Weighted Huber hiện tại với L1/L2, loss phân loại cường độ và loss cấu trúc. Adversarial loss chỉ nên được thêm sau khi mô hình deterministic và physics loss đã ổn định.
+
+### 6.3. Không so sánh trực tiếp số liệu hiện tại với paper
+
+Kết quả của ConvLSTM trong đề tài và kết quả ThoR trong paper không thể so sánh trực tiếp vì:
+
+- Đề tài đang dùng dữ liệu vệ tinh IMERG, còn paper đánh giá trên radar MRMS và radar Nhà Bè.
+- Grid, sai số quan sát và độ phân giải không gian khác nhau.
+- Đề tài dùng đơn vị `mm/30 phút`; paper báo cáo các ngưỡng theo `mm/h`.
+- Ngưỡng CSI hiện tại là `0,1/2,5/10 mm/30 phút`, không trùng `1/8/16 mm/h` của paper.
+- Kiến trúc và hàm loss hiện tại chưa chứa motion network, PDE loss hoặc discriminator.
+
+Vì vậy, paper được sử dụng để xác định kiến trúc và giả thuyết nghiên cứu. Hiệu quả trong đề tài phải được chứng minh bằng thí nghiệm ablation trên cùng split IMERG.
+
+### 6.4. Kiến trúc đa nguồn đề xuất
+
+```mermaid
+flowchart LR
+    subgraph Sources["Ba nguồn dữ liệu đã chuẩn bị"]
+        I["IMERG<br/>mưa 30 phút<br/>grid 0,1°"]
+        H["Himawari-9 AHI<br/>IR/WV brightness temperature<br/>10 phút → lấy mẫu 30 phút"]
+        E["ERA5<br/>tp, t2m, msl, u10, v10<br/>1 giờ, grid 0,25°"]
+    end
+
+    I --> A["Đồng bộ UTC, regrid,<br/>mask missing và normalize"]
+    H --> A
+    E --> A
+
+    A --> RI["Rain encoder<br/>ConvLSTM/ConvGRU"]
+    A --> CH["Cloud encoder<br/>CNN + temporal attention"]
+    A --> AT["Atmospheric encoder<br/>CNN cho ERA5"]
+
+    RI --> M["Motion module Mφ<br/>Vlearned=(u,v)"]
+    AT --> F["Gated motion fusion<br/>Vlearned + Vera5"]
+    M --> F
+    CH --> G["Motion-conditioned generator Gθ"]
+    RI --> G
+    F --> G
+
+    G --> T["Soft TFC<br/>điều kiện đầu"]
+    T --> O["Dự báo mưa<br/>+30, +60, +90, +120 phút"]
+
+    F --> P["Advection–Diffusion<br/>và velocity loss"]
+    O --> P
+    O --> D["Weighted data loss<br/>Intensity + FSS/SSIM"]
+    P --> L["Composite objective"]
+    D --> L
+```
+
+**Hình 5.** Kiến trúc đề xuất cho giai đoạn tiếp theo. Đây là roadmap, chưa phải kiến trúc của checkpoint `best.pt` hiện tại.
+
+### 6.5. Cách mỗi nguồn dữ liệu có thể cải thiện mô hình
+
+#### IMERG
+
+IMERG tiếp tục là trục chính của bài toán vì cung cấp lượng mưa theo lưới và có chuỗi lịch sử đủ dài. Cải tiến cần thực hiện:
+
+- Bổ sung dữ liệu sau tháng 9/2025 nếu nguồn đã có.
+- Oversample các cửa sổ có mưa vừa và mưa lớn.
+- Phân tầng đánh giá theo mùa, vùng địa lý và cấp mưa.
+- Kiểm tra bias giữa mưa vệ tinh và quan trắc radar/trạm nếu có dữ liệu đối chứng.
+
+#### Himawari
+
+Himawari có thể cải thiện khả năng nhận biết quá trình sinh–tan và tăng cường đối lưu, là phần mà ngoại suy trường mưa thường bỏ lỡ:
+
+- `B08/B09/B10`: cung cấp cấu trúc hơi nước ở các tầng khác nhau.
+- `B13/B14/B15`: cung cấp nhiệt độ đỉnh mây và các đặc trưng cửa sổ hồng ngoại.
+- Chênh lệch băng, ví dụ `B13-B15`, có thể hỗ trợ phân biệt loại mây và vùng đối lưu.
+- Tốc độ giảm brightness temperature theo thời gian có thể là dấu hiệu mây phát triển nhanh trước khi xuất hiện mưa lớn.
+
+Việc cần làm trước khi train là backfill Himawari cho giai đoạn 2023–09/2025, reproject đúng phép chiếu địa tĩnh, resample về grid IMERG và giữ cờ missing riêng cho từng channel.
+
+#### ERA5
+
+ERA5 bổ sung trạng thái khí quyển quy mô lớn:
+
+- `u10`, `v10`: cung cấp hướng và tốc độ gió gần bề mặt.
+- `t2m`: cung cấp bối cảnh nhiệt độ.
+- `msl`: cung cấp cấu trúc áp suất quy mô synoptic.
+- `tp`: dùng làm predictor/baseline phụ, không thay IMERG làm ground truth nếu chưa hiệu chỉnh bias.
+
+Gió 10 m không đồng nhất với vận tốc di chuyển của mây hoặc hệ mưa ở tầng cao. Do đó, không nên thay thẳng trường chuyển động học từ ảnh bằng `u10/v10`. Phương án phù hợp hơn là gated fusion giữa trường motion học từ IMERG/Himawari và trường gió ERA5. Nếu có thể mở rộng dữ liệu, nên bổ sung gió ở các mực 850, 700 và 500 hPa để phản ánh chuyển động ở các tầng khí quyển liên quan đến mây đối lưu.
+
+### 6.6. Các cải tiến ưu tiên
+
+#### 1. Cải thiện mưa lớn
+
+CSI tại `10 mm/30 phút` của ConvLSTM thấp hơn persistence, nên đây là ưu tiên cao nhất:
+
+- Event-balanced sampler hoặc oversampling cửa sổ có mưa lớn.
+- Multi-threshold intensity loss thay cho chỉ regression loss.
+- Focal loss hoặc focal-style weighting cho các bin mưa hiếm.
+- Thêm FSS/SSIM loss để giữ hình dạng vùng mưa, thay vì chỉ tối ưu từng pixel.
+- Báo cáo Precision, POD và FAR để phân biệt bỏ sót với báo động giả.
+
+#### 2. Giảm hiện tượng làm mượt
+
+- Thêm multi-scale encoder–decoder và skip connection.
+- Bổ sung axial attention hoặc spatial attention như định hướng ThoR.
+- Kết hợp loss miền tần số hoặc gradient/edge loss.
+- Chỉ khảo sát PatchGAN hoặc diffusion sau khi baseline deterministic ổn định, vì mô hình sinh làm tăng đáng kể độ phức tạp huấn luyện và đánh giá.
+
+#### 3. Giảm tích lũy sai số theo lead time
+
+- Train trực tiếp cho horizon cần sử dụng thay vì lặp mô hình 2 giờ thành 24 giờ.
+- Dùng scheduled sampling và multi-horizon loss với trọng số riêng cho từng lead time.
+- Duy trì hidden state/motion state qua toàn horizon thay vì chỉ feedback ảnh dự báo.
+- Nếu mục tiêu thật sự là dự báo ngày tiếp theo, nên tách thành bài toán khác có ERA5 làm nguồn chính, không gọi đó là nowcasting 2 giờ.
+
+#### 4. Tích hợp vật lý có kiểm soát
+
+- Triển khai finite-difference kernels và kiểm thử trên các trường tổng hợp trước.
+- Quy đổi đúng khoảng cách grid từ độ sang mét; khoảng cách theo kinh độ phụ thuộc vĩ độ.
+- Sử dụng $\Delta t=1.800$ giây cho IMERG 30 phút và kiểm tra tính nhất quán đơn vị của $u,v,\nu$.
+- Cho phép source/sink residual để không ép hệ mưa đối lưu tuân thủ bảo toàn cứng.
+- Warm-up data loss trước, sau đó tăng dần trọng số physics loss để tránh tối ưu mất ổn định.
+
+#### 5. Bổ sung bất định dự báo
+
+Một dự báo duy nhất không phản ánh đầy đủ tính hỗn loạn của mưa đối lưu. Có thể phát triển ensemble, quantile regression hoặc mô hình xác suất để cung cấp dải bất định và xác suất vượt ngưỡng mưa lớn.
+
+### 6.7. Kế hoạch thí nghiệm ablation
+
+Các thí nghiệm nên dùng cùng temporal split và cùng test windows để so sánh công bằng:
+
+| Mã | Input/kiến trúc | Mục tiêu |
+|---|---|---|
+| EXP-00 | Persistence | Baseline tối thiểu |
+| EXP-01 | IMERG ConvLSTM hiện tại | Baseline học sâu |
+| EXP-02 | IMERG + loss cân bằng mưa lớn | Đo tác động của loss/sampling |
+| EXP-03 | IMERG + Himawari | Đo giá trị của tín hiệu mây |
+| EXP-04 | IMERG + ERA5 | Đo giá trị của bối cảnh khí quyển |
+| EXP-05 | IMERG + Himawari + ERA5 | Đo hiệu quả hợp nhất đa nguồn |
+| EXP-06 | ThoR-inspired learned motion + PDE | Đo đóng góp của ràng buộc vật lý |
+| EXP-07 | Learned motion + PDE + ERA5 wind prior | Đo giá trị bổ sung của gió quan sát |
+
+Mỗi thí nghiệm cần báo cáo MAE, RMSE, bias, CSI, POD, FAR, FSS và SSIM theo từng lead time. Ngoài kết quả trung bình, cần tách riêng các cửa sổ mưa lớn vì cải thiện chỉ số trung bình có thể che khuất việc mô hình vẫn bỏ sót sự kiện cực đoan.
+
+### 6.8. Lộ trình thực hiện đề xuất
+
+| Giai đoạn | Công việc chính | Sản phẩm đầu ra |
+|---|---|---|
+| 2A — Đồng bộ dữ liệu | Backfill Himawari; regrid ERA5; align UTC và mask missing | Dataset đa nguồn cùng grid/timestamp |
+| 2B — Multimodal baseline | Encoder riêng cho mưa, mây và khí quyển; feature fusion | Kết quả EXP-03 đến EXP-05 |
+| 2C — Physics-informed | Motion network, Burgers update, PDE residual và TFC | Kết quả EXP-06/07 và ablation |
+| 2D — Mưa cực đoan | Intensity loss, balanced sampler, attention và loss cấu trúc | Cải thiện CSI/FSS ở ngưỡng cao |
+| 2E — Bất định và vận hành | Ensemble/quantile, kiểm tra latency và missing data | Dự báo kèm độ tin cậy và pipeline gần thời gian thực |
+
+Thứ tự này giúp mỗi thay đổi đều có baseline để so sánh. Không nên triển khai đồng thời data fusion, GAN và toàn bộ physics loss ngay từ đầu vì khi kết quả thay đổi sẽ khó xác định thành phần nào thực sự có ích.
 
 ---
 
@@ -481,3 +810,12 @@ ConvLSTM đã vượt persistence baseline về sai số tổng thể và khả 
 - [`rainfall_nowcasting/metrics.py`](../rainfall_nowcasting/metrics.py): MAE, RMSE, CSI và FSS.
 - [`MODEL_TRAINING.md`](../MODEL_TRAINING.md): hướng dẫn train và đánh giá.
 - [`test_metrics.json`](../IMERG_data/outputs/convlstm/test_metrics.json): kết quả đánh giá đầy đủ trên test.
+- [`HIMAWARI_DATASET_SURVEY.md`](./HIMAWARI_DATASET_SURVEY.md): khảo sát nguồn, băng phổ và pipeline Himawari.
+- [`Himawari/data/download.ipynb`](../Himawari/data/download.ipynb): tải chuỗi Himawari-9 B13.
+- [`Himawari/data/download_crop_vietnam_month.ipynb`](../Himawari/data/download_crop_vietnam_month.ipynb): tải tháng, crop và lưu NetCDF.
+- [`ERA5/01_Download_ERA5.ipynb`](../ERA5/01_Download_ERA5.ipynb): tải dữ liệu ERA5.
+- [`ERA5/02_EDA_ERA5.ipynb`](../ERA5/02_EDA_ERA5.ipynb): EDA đa biến ERA5.
+- [`ERA5/03_Data_Preprocessing.ipynb`](../ERA5/03_Data_Preprocessing.ipynb): chuẩn hóa, tensor và DataLoader ERA5.
+- [`ERA5/04_Model_Training_PINN.ipynb`](../ERA5/04_Model_Training_PINN.ipynb): prototype notebook cho physics-informed training.
+- [`Architecture_Roadmap_PIDL.md`](./Architecture_Roadmap_PIDL.md): kiến trúc PIDL dự kiến của project.
+- [Paper ThoR trên Scientific Reports](https://doi.org/10.1038/s41598-025-26126-6): nguồn tham khảo chính cho motion-dependent physics-informed nowcasting.
